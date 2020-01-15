@@ -55,6 +55,7 @@ class Tracking
 {
 
 public:
+    bool needNewKF = true;
     cv::Mat LKimg;
 public:
     Tracking(System* pSys, ORBVocabulary* pVoc, FrameDrawer* pFrameDrawer, MapDrawer* pMapDrawer, Map* pMap,
@@ -210,6 +211,7 @@ protected:
 
     //Current matches in frame
     int mnMatchesInliers;
+    int last_mnMatchesInliers;
 
     //Last Frame, KeyFrame and Relocalisation Info
     KeyFrame* mpLastKeyFrame;

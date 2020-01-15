@@ -62,7 +62,11 @@ Frame::Frame(const Frame &frame)
 }
 
 
-// 双目的初始化
+Frame::Frame(bool idPlus)
+{
+    if(idPlus)
+        mnId=nNextId++;
+}
 Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeStamp, ORBextractor* extractorLeft, ORBextractor* extractorRight, ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth)
     :mpORBvocabulary(voc),mpORBextractorLeft(extractorLeft),mpORBextractorRight(extractorRight), mTimeStamp(timeStamp), mK(K.clone()),mDistCoef(distCoef.clone()), mbf(bf), mb(0), mThDepth(thDepth),
      mpReferenceKF(static_cast<KeyFrame*>(NULL))

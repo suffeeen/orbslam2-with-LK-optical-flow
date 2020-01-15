@@ -21,28 +21,36 @@ using namespace ORB_SLAM2;
 #include <opencv2/video/tracking.hpp>
 using namespace cv;
 
- vector< cv::Point2f > keypoints;
- vector<cv::Point3f> mappointInCurrentFrame;
+vector< cv::Point2f > keypoints;
+vector<cv::Point3f> mappointInCurrentFrame;
 vector<cv::Point2f> prev_keypoints;
 cv::Mat last_color;
-Mat computeMtcwUseLK(KeyFrame *lastKeyFrame, Mat color, bool lastColorIsKeyFrame, Mat K, Mat mDistCoef)
+/**非关键帧的情况下，使用光流法跟踪关键帧的特征点,使用 PNP_RANSAC 来计算相机位姿
+ * 暂未解决 无法把所有帧的位姿加入CameraTrajectory.txt的问题
+ * **/
+
+Mat computeMtcwUseLK(KeyFrame *lastKeyFrame, Mat color, bool lastColorIsKeyFrame, Mat K, Mat mDistCoef, Mat &mTcw, int &mnMatchesInliers)
 {
+    int obsPlus = 0;
+    if(lastKeyFrame->mnId>3)
+        obsPlus = 3;
+
     if(last_color.empty())
     {
-        cout<<"fill last color fist time"<<endl;
+//        cout<<"fill last color fist time"<<endl;
         last_color = color;
         return cv::Mat();
     }
-cout<<"TAG0"<<endl;
-if(lastColorIsKeyFrame || keypoints.empty())
+    /**上一帧是关键帧的情况**/
+    if(lastColorIsKeyFrame || keypoints.empty())
     {
-        cout<<lastKeyFrame->mvKeysUn.size()<<endl;
+//        cout<<lastKeyFrame->mvKeysUn.size()<<endl;
         keypoints.clear();
         mappointInCurrentFrame.clear();
-        cout<<"TAG0.1"<<endl;
+
         for(int i=0;i<lastKeyFrame->mvpMapPoints.size();i++)//copy point from keyframe
         {
-            if(lastKeyFrame->mvpMapPoints[i]&&lastKeyFrame->mvpMapPoints[i]->nObs>1)///if the program died here, try to change 1 to 0
+            if(lastKeyFrame->mvpMapPoints[i]&&lastKeyFrame->mvpMapPoints[i]->Observations()>obsPlus)///if the program died here, try to change 1 to 0
             {
                 keypoints.push_back(lastKeyFrame->mvKeysUn[i].pt);
                 cv::Point3f pt3f;
@@ -54,33 +62,21 @@ if(lastColorIsKeyFrame || keypoints.empty())
                 mappointInCurrentFrame.push_back(pt3f);
             }
         }
-        cout<<"TAG0.2"<<endl;
     }
+    /**需要用到的数据*/
     vector<cv::Point2f> next_keypoints;
     prev_keypoints.clear();
     for ( auto kp:keypoints )
         prev_keypoints.push_back(kp);
-    vector<unsigned char> status;
+    vector<unsigned char> status;//判断该点是否跟踪失败
     vector<float> error;
-    cout<<"TAG1"<<endl;
-    if(last_color.empty()||color.empty()||prev_keypoints.empty()||keypoints.empty())//error
-    {
-        if(last_color.empty())
-            cout<<"last color empty"<<endl;
-        if(color.empty())
-            cout<<"color empty"<<endl;
-        if(prev_keypoints.empty())
-            cout<<"prev_keypoints empty"<<endl;
-        if(keypoints.empty())
-            cout<<"keypoint empty"<<endl;
-    }
-    chrono::steady_clock::time_point t1 = chrono::steady_clock::now();
-    cv::calcOpticalFlowPyrLK( last_color, color, prev_keypoints, next_keypoints, status, error );
-    chrono::steady_clock::time_point t2 = chrono::steady_clock::now();
-    chrono::duration<double> time_used = chrono::duration_cast<chrono::duration<double>>( t2-t1 );
-    cout<<"LK Flow use time："<<time_used.count()<<" seconds."<<endl;
-    cout<<"TAG2"<<endl;
-    // 把跟丢的点删掉
+    Mat last_gray,gray;//LK光流法用于跟踪特征点的两帧
+    cvtColor(last_color,last_gray,CV_BGR2GRAY);
+    cvtColor(color,gray,CV_BGR2GRAY);
+//    cout<<"preKeyPointNum"<<prev_keypoints.size()<<endl;
+    cv::calcOpticalFlowPyrLK( last_gray, gray, prev_keypoints, next_keypoints, status, error );//计算光流
+
+    /** 把跟丢的点删掉**/
     int i=0;
     for ( auto iter=keypoints.begin(); iter!=keypoints.end(); i++)
     {
@@ -89,10 +85,10 @@ if(lastColorIsKeyFrame || keypoints.empty())
             iter = keypoints.erase(iter);
             continue;
         }
-            *iter = next_keypoints[i];//edit keypoints' coordinate
+        *iter = next_keypoints[i];//edit keypoints' coordinate
         iter++;
     }
-    cout<<"tracked keypoints: "<<keypoints.size()<<endl;
+//    cout<<"tracked keypoints: "<<keypoints.size()<<endl;
     i = 0;
     for ( auto iter=mappointInCurrentFrame.begin(); iter!=mappointInCurrentFrame.end(); i++)//erase the match mappoint while the keypoint is erased
     {
@@ -103,51 +99,56 @@ if(lastColorIsKeyFrame || keypoints.empty())
         }
         iter++;
     }
-    cout<<"TAG3"<<endl;
+    /**使用PnPRansac计算位姿*/
     vector<cv::Mat> point3D;
-
     cv:Mat R_vector,T,R;
+    vector<int> ransacInlier;
     if(!(mappointInCurrentFrame.empty()||keypoints.empty()||mDistCoef.empty()))
     {
-        chrono::steady_clock::time_point t3 = chrono::steady_clock::now();
-        cv::solvePnPRansac(mappointInCurrentFrame, keypoints, K, mDistCoef , R_vector, T);
+        cout<<"pointNUM"<<mappointInCurrentFrame.size()<<endl;
+        if(keypoints.size()<20)
+        {
+            cout<<"Optical flow need more points"<<endl;
+            return cv::Mat();
+        }
+        cv::solvePnPRansac(mappointInCurrentFrame, keypoints, K, mDistCoef , R_vector, T, false, 50,3, 0.98, ransacInlier, SOLVEPNP_ITERATIVE);
+
         cv::Rodrigues(R_vector, R);
-        chrono::steady_clock::time_point t4 = chrono::steady_clock::now();
-        chrono::duration<double> time_used = chrono::duration_cast<chrono::duration<double>>( t4-t3 );
-        cout<<"solve PnP RANSAC use time："<<time_used.count()<<" seconds."<<endl;
         Mat_<double> Rt = (Mat_<double>(4, 4) << R.at<double>(0,0), R.at<double>(0,1), R.at<double>(0,2),T.at<double>(0),
-                                                            R.at<double>(1,0), R.at<double>(1,1), R.at<double>(1,2),T.at<double>(1),
-                                                            R.at<double>(2,0), R.at<double>(2,1), R.at<double>(2,2),T.at<double>(2),
-                                                            0, 0, 0, 1);
+                R.at<double>(1,0), R.at<double>(1,1), R.at<double>(1,2),T.at<double>(1),
+                R.at<double>(2,0), R.at<double>(2,1), R.at<double>(2,2),T.at<double>(2),
+                0, 0, 0, 1);
         cv::Mat Rt_float;
         Rt.convertTo(Rt_float,CV_32FC1);
-        cout<<"LK_PNP_RANSAC pose: "<<endl<<Rt_float<<endl;
-
-
+        mTcw = Rt_float;//位姿
     }
-    cout<<"TAG4"<<endl;
-
 
     if (keypoints.size() == 0)
     {
         cout<<"LK -- all keypoints are lost."<<endl;
-        //return cv::Mat();
+        return cv::Mat();
     }
-    // 画出 keypoints
+    /** 画出 keypoints*/
     cv::Mat img_show = color.clone();
-    int pointInImg_show = 0;
+    int point = 0;
+    int iterOfInlier = 0;
     for ( auto kp:keypoints )
     {
-        pointInImg_show++;
-        if(pointInImg_show%4<3)//show a quarter of the points
-            continue;
-        cv::circle(img_show, kp, 4, cv::Scalar(0, 255, 0), 1);
-        cv::circle(img_show, kp, 1, cv::Scalar(0, 255, 0), -1);
-
+        for(iterOfInlier =0;iterOfInlier<ransacInlier.size();iterOfInlier++)
+        {
+            if(point == ransacInlier[iterOfInlier])
+            {
+                cv::circle(img_show, kp, 5, cv::Scalar(0, 255, 0), 1);
+                cv::circle(img_show, kp, 1, cv::Scalar(0, 255, 0), -1);
+            }
+        }
+        point++;
     }
+    mnMatchesInliers = ransacInlier.size();
+//    cout<<"PNP inlier: "<<ransacInlier.size()<<endl;
     last_color = color;
-    return img_show;
 
+    return img_show;//返回值是rgb图片，用于显示光流跟踪到的特征点
 }
 
 

@@ -267,17 +267,40 @@ cv::Mat Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const d
         imDepth.convertTo(imDepth,CV_32F,mDepthMapFactor);
 
     // 步骤3：构造Frame
-    mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth);
+//    static int count =0;
 
-    if(mCurrentFrame.mnId>10)
-        LKimg = computeMtcwUseLK(mpLastKeyFrame, imRGB,  mCurrentFrame.mnId - mpLastKeyFrame->mnFrameId ==1, mK, mDistCoef);
-    vector<int> compression_params;   compression_params.push_back(CV_IMWRITE_PNG_COMPRESSION);
-    compression_params.push_back(9);
 
     // 步骤4：跟踪
-    Track();
-    cout<<"orbslam mTcw:"<<endl<<mCurrentFrame.mTcw<<endl;
 
+    needNewKF = NeedNewKeyFrame();
+    if(!needNewKF)
+    {
+        clock_t a = clock();
+        mCurrentFrame = Frame(true);
+        cv::Mat mTcw;
+        last_mnMatchesInliers = mnMatchesInliers;
+        LKimg = computeMtcwUseLK(mpLastKeyFrame, imRGB,  mCurrentFrame.mnId - mpLastKeyFrame->mnFrameId ==1, mK, mDistCoef, mTcw, mnMatchesInliers);
+//        LKimg = flow(mpLastKeyFrame, imRGB,  mCurrentFrame.mnId - mpLastKeyFrame->mnFrameId ==1, mK, mDistCoef, mTcw);
+        mpFrameDrawer->LK = LKimg;
+        mCurrentFrame.mTcw = mTcw;
+        clock_t b = clock();
+        cout<<"track LK optical flow use time:"<<1000*(float)(b-a)/CLOCKS_PER_SEC<<"ms"<<endl;
+        mpFrameDrawer->Update(this);
+        needNewKF = NeedNewKeyFrame();
+    }
+    if(needNewKF)
+    {
+        clock_t a1  = clock();
+        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth);
+//        cout<<" track Feature :currentFrame ID:"<<mCurrentFrame.mnId<<endl;
+        Track();
+        clock_t  a2 = clock();
+        cout<<"KeyFrame track feature  use time:"<<1000*(float)(a2-a1)/CLOCKS_PER_SEC<<"ms------"<<endl;
+    }
+//    cout<<"currentFrame and pose: "<<mCurrentFrame.mnId<<endl;
+//    cout<<mCurrentFrame.mTcw<<endl;
+//    cout<<"orbslam mTcw:"<<endl<<mCurrentFrame.mTcw<<endl;
+//    count++;
     return mCurrentFrame.mTcw.clone();
 }
 
@@ -576,7 +599,7 @@ void Tracking::Track()
 
             // Check if we need to insert a new keyframe
             // 步骤2.6：检测并插入关键帧，对于双目会产生新的MapPoints
-            if(NeedNewKeyFrame())
+            if(needNewKF)
                 CreateNewKeyFrame();
 
             // We allow points with high innovation (considererd outliers by the Huber Function)
@@ -1265,7 +1288,6 @@ bool Tracking::TrackLocalMap()
     // 步骤4：决定是否跟踪成功
     if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50)
         return false;
-
     if(mnMatchesInliers<30)
         return false;
     else
@@ -1278,18 +1300,23 @@ bool Tracking::TrackLocalMap()
  */
 bool Tracking::NeedNewKeyFrame()
 {
+    static int frameCount = 0;
+    if(frameCount<3)
+    {
+        frameCount++;
+        return true;
+    }
+
     // 步骤1：如果用户在界面上选择重定位，那么将不插入关键帧
     // 由于插入关键帧过程中会生成MapPoint，因此用户选择重定位后地图上的点云和关键帧都不会再增加
     if(mbOnlyTracking)
         return false;
-
     // If Local Mapping is freezed by a Loop Closure do not insert keyframes
     // 如果局部地图被闭环检测使用，则不插入关键帧
     if(mpLocalMapper->isStopped() || mpLocalMapper->stopRequested())
         return false;
 
     const int nKFs = mpMap->KeyFramesInMap();
-
     // Do not insert keyframes if not enough frames have passed from last relocalisation
     // 步骤2：判断是否距离上一次插入关键帧的时间太短
     // mCurrentFrame.mnId是当前帧的ID
@@ -1303,11 +1330,10 @@ bool Tracking::NeedNewKeyFrame()
     // Tracked MapPoints in the reference keyframe
     // 步骤3：得到参考关键帧跟踪到的MapPoints数量
 	// 在UpdateLocalKeyFrames函数中会将与当前关键帧共视程度最高的关键帧设定为当前帧的参考关键帧
-    int nMinObs = 3;
-    if(nKFs<=2)
-        nMinObs=2;
-    int nRefMatches = mpReferenceKF->TrackedMapPoints(nMinObs);
-
+//    int nMinObs = 3;
+//    if(nKFs<=2)
+//        nMinObs=2;
+//    int nRefMatches = mpReferenceKF->TrackedMapPoints(nMinObs);
     // Local Mapping accept keyframes?
     // 步骤4：查询局部地图管理器是否繁忙
     bool bLocalMappingIdle = mpLocalMapper->AcceptKeyFrames();
@@ -1319,42 +1345,42 @@ bool Tracking::NeedNewKeyFrame()
     // 步骤5：对于双目或RGBD摄像头，统计总的可以添加的MapPoints数量和跟踪到地图中的MapPoints数量
     int nMap = 0;
     int nTotal= 0;
-    if(mSensor!=System::MONOCULAR)// 双目或rgbd
-    {
-        for(int i =0; i<mCurrentFrame.N; i++)
-        {
-            if(mCurrentFrame.mvDepth[i]>0 && mCurrentFrame.mvDepth[i]<mThDepth)
-            {
-                nTotal++;// 总的可以添加mappoints数
-                if(mCurrentFrame.mvpMapPoints[i])
-                    if(mCurrentFrame.mvpMapPoints[i]->Observations()>0)
-                        nMap++;// 被关键帧观测到的mappoints数，即观测到地图中的MapPoints数量
-            }
-        }
-    }
-    else
-    {
-        // There are no visual odometry matches in the monocular case
-        nMap=1;
-        nTotal=1;
-    }
-
-    const float ratioMap = (float)nMap/(float)(std::max(1,nTotal));
-
-    // 步骤6：决策是否需要插入关键帧
-    // Thresholds
-    // 设定inlier阈值，和之前帧特征点匹配的inlier比例
-    float thRefRatio = 0.75f;
-    if(nKFs<2)
-        thRefRatio = 0.4f;// 关键帧只有一帧，那么插入关键帧的阈值设置很低
-    if(mSensor==System::MONOCULAR)
-        thRefRatio = 0.9f;
-
-    // MapPoints中和地图关联的比例阈值
-    float thMapRatio = 0.35f;
-    if(mnMatchesInliers>300)
-        thMapRatio = 0.20f;
-
+//    if(mSensor!=System::MONOCULAR)// 双目或rgbd
+//    {
+//        for(int i =0; i<mCurrentFrame.N; i++)
+//        {
+//            if(mCurrentFrame.mvDepth[i]>0 && mCurrentFrame.mvDepth[i]<mThDepth)
+//            {
+//                nTotal++;// 总的可以添加mappoints数
+//                if(mCurrentFrame.mvpMapPoints[i])
+//                    if(mCurrentFrame.mvpMapPoints[i]->Observations()>0)
+//                        nMap++;// 被关键帧观测到的mappoints数，即观测到地图中的MapPoints数量
+//            }
+//        }
+//    }
+//    else
+//    {
+//        // There are no visual odometry matches in the monocular case
+//        nMap=1;
+//        nTotal=1;
+//    }
+//
+//    const float ratioMap = (float)nMap/(float)(std::max(1,nTotal));
+//    const float ratioMap = 0.1;//modified here ()
+//
+//    // 步骤6：决策是否需要插入关键帧
+//    // Thresholds
+//    // 设定inlier阈值，和之前帧特征点匹配的inlier比例
+//    float thRefRatio = 0.75f;
+//    if(nKFs<2)
+//        thRefRatio = 0.4f;// 关键帧只有一帧，那么插入关键帧的阈值设置很低
+//    if(mSensor==System::MONOCULAR)
+//        thRefRatio = 0.9f;
+//
+//    // MapPoints中和地图关联的比例阈值
+//    float thMapRatio = 0.35f;
+//    if(mnMatchesInliers>300)
+//        thMapRatio = 0.20f;
     // Condition 1a: More than "MaxFrames" have passed from last keyframe insertion
     // 很长时间没有插入关键帧
     const bool c1a = mCurrentFrame.mnId>=mnLastKeyFrameId+mMaxFrames;
@@ -1363,12 +1389,16 @@ bool Tracking::NeedNewKeyFrame()
     const bool c1b = (mCurrentFrame.mnId>=mnLastKeyFrameId+mMinFrames && bLocalMappingIdle);
     // Condition 1c: tracking is weak
     // 跟踪要跪的节奏，0.25和0.3是一个比较低的阈值
-    const bool c1c =  mSensor!=System::MONOCULAR && (mnMatchesInliers<nRefMatches*0.25 || ratioMap<0.3f) ;
+//    const bool c1c =  mSensor!=System::MONOCULAR && (mnMatchesInliers<nRefMatches*0.25 || ratioMap<0.3f) ;
     // Condition 2: Few tracked points compared to reference keyframe. Lots of visual odometry compared to map matches.
     // 阈值比c1c要高，与之前参考帧（最近的一个关键帧）重复度不是太高
-    const bool c2 = ((mnMatchesInliers<nRefMatches*thRefRatio || ratioMap<thMapRatio) && mnMatchesInliers>15);
+//    const bool c2 = ((mnMatchesInliers<nRefMatches*thRefRatio || ratioMap<thMapRatio) && mnMatchesInliers>15);
+    const bool c3 = mSensor!=System::MONOCULAR &&(mnMatchesInliers<300 && mnMatchesInliers>0);
+    const bool c4 = mSensor!=System::MONOCULAR &&(mnMatchesInliers<100 && mnMatchesInliers>0);
+    const bool c5 = last_mnMatchesInliers/mnMatchesInliers>2;///inlier decrease fast
 
-    if((c1a||c1b||c1c)&&c2)
+//    if((c1a||c1b||c1c)&&c2)
+    if(( (c1a||c1b)&&c3 )||(c4||c5))
     {
         // If the mapping accepts keyframes, insert keyframe.
         // Otherwise send a signal to interrupt BA
@@ -1384,7 +1414,7 @@ bool Tracking::NeedNewKeyFrame()
                 // 队列里不能阻塞太多关键帧
                 // tracking插入关键帧不是直接插入，而且先插入到mlNewKeyFrames中，
                 // 然后localmapper再逐个pop出来插入到mspKeyFrames
-                if(mpLocalMapper->KeyframesInQueue()<3)
+                if(mpLocalMapper->KeyframesInQueue()<2)
                     return true;
                 else
                     return false;
